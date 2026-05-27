@@ -1,93 +1,38 @@
-name: Build
+name: Fork Release
+
+# Fork-only workflow: builds darwin-arm64 and windows-amd64 from a tag
+# and attaches them to a GitHub Release on this fork. The upstream
+# workflow is replaced on this branch only — main keeps the original.
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - '*'
-  pull_request:
-    branches:
-      - main
+      - 'v*'
 
 env:
   GO_VERSION: 1.25.x
   CGO_ENABLED: 1
-  CR_BUILD_ARTIFACTS_DIR: dist
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9.0.0
-
-      - name: Run prettier
-        uses: creyD/prettier_action@v4.6
-        with:
-          prettier_options: --check frontend/
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run tests
-        run: make test-ci
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
   release:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ${{ matrix.os }}
-    if: startsWith(github.ref, 'refs/tags/')
-
-    needs:
-      - lint
-      - test
 
     permissions:
       contents: write
 
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            os: ubuntu-latest
-
-          - goos: linux
-            goarch: arm64
-            os: ubuntu-latest
-
-          - goos: darwin
-            goarch: amd64
-            os: macos-latest
-
           - goos: darwin
             goarch: arm64
             os: macos-latest
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            os: windows-latest
+            ext: ".exe"
 
     steps:
       - name: Checkout code
@@ -100,29 +45,31 @@ jobs:
 
       - name: Get version from tag
         id: version
+        shell: bash
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Install dependencies (Linux)
-        if: matrix.goos == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
       - name: Build
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CC: ${{ matrix.goos == 'linux' && matrix.goarch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
-          CR_EXECUTABLE_FILENAME: claude-review-${{ matrix.goos }}-${{ matrix.goarch }}
-          CR_VERSION: ${{ steps.version.outputs.version }}
-        run: make build
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X main.Version=${{ steps.version.outputs.version }}" \
+            -o "dist/claude-review-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ./dist/claude-review-${{ matrix.goos }}-${{ matrix.goarch }}
-            ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' && './install.sh' || '' }}
+          files: dist/claude-review-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
           generate_release_notes: true
+          body: |
+            Patched build of claude-review with absolute-path / `~/` support for `--file`.
+            Source: PR https://github.com/Ch00k/claude-review/pull/20
+
+            **Installation**:
+            - macOS (Apple Silicon): download `claude-review-darwin-arm64`, `chmod +x`, ad-hoc sign with `codesign -s - claude-review-darwin-arm64`, and move into your PATH.
+            - Windows: download `claude-review-windows-amd64.exe` and place into your PATH.
